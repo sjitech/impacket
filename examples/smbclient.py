@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -36,8 +36,21 @@ except ImportError:
   import readline
 
 class MiniImpacketShell(cmd.Cmd):    
-    def __init__(self, smbClient):
-        cmd.Cmd.__init__(self)
+    def __init__(self, smbClient,tcpShell=None):
+        #If the tcpShell parameter is passed (used in ntlmrelayx), 
+        # all input and output is redirected to a tcp socket
+        # instead of to stdin / stdout
+        if tcpShell is not None:
+            cmd.Cmd.__init__(self,stdin=tcpShell,stdout=tcpShell)
+            sys.stdout = tcpShell
+            sys.stdin = tcpShell
+            sys.stderr = tcpShell
+            self.use_rawinput = False
+            self.shell = tcpShell
+        else:
+            cmd.Cmd.__init__(self)
+            self.shell = None
+
         self.prompt = '# '
         self.smb = smbClient
         self.username, self.password, self.domain, self.lmhash, self.nthash, self.aesKey, self.TGT, self.TGS = smbClient.getCredentials()
@@ -68,6 +81,8 @@ class MiniImpacketShell(cmd.Cmd):
         return retVal
 
     def do_exit(self,line):
+        if self.shell is not None:
+            self.shell.close()
         return True
 
     def do_shell(self, line):
@@ -287,7 +302,9 @@ class MiniImpacketShell(cmd.Cmd):
         resp = srvs.hNetrSessionEnum(dce, NULL, NULL, 10)
 
         for session in resp['InfoStruct']['SessionInfo']['Level10']['Buffer']:
-            print "host: %15s, user: %5s, active: %5d, idle: %5d" % (session['sesi10_cname'][:-1], session['sesi10_username'][:-1], session['sesi10_time'], session['sesi10_idle_time'])
+            print "host: %15s, user: %5s, active: %5d, idle: %5d" % (
+            session['sesi10_cname'][:-1], session['sesi10_username'][:-1], session['sesi10_time'],
+            session['sesi10_idle_time'])
 
     def do_shares(self, line):
         if self.loggedIn is False:
@@ -359,9 +376,11 @@ class MiniImpacketShell(cmd.Cmd):
         pwd = string.replace(pwd,'/','\\')
         pwd = ntpath.normpath(pwd)
         for f in self.smb.listPath(self.share, pwd):
-           if display is True:
-               print "%crw-rw-rw- %10d  %s %s" % ('d' if f.is_directory() > 0 else '-', f.get_filesize(),  time.ctime(float(f.get_mtime_epoch())) ,f.get_longname() )
-           self.completion.append((f.get_longname(),f.is_directory()))
+            if display is True:
+                print "%crw-rw-rw- %10d  %s %s" % (
+                'd' if f.is_directory() > 0 else '-', f.get_filesize(), time.ctime(float(f.get_mtime_epoch())),
+                f.get_longname())
+            self.completion.append((f.get_longname(), f.is_directory()))
 
 
     def do_rm(self, filename):
@@ -455,8 +474,23 @@ def main():
 
     group.add_argument('-hashes', action="store", metavar = "LMHASH:NTHASH", help='NTLM hashes, format is LMHASH:NTHASH')
     group.add_argument('-no-pass', action="store_true", help='don\'t ask for password (useful for -k)')
-    group.add_argument('-k', action="store_true", help='Use Kerberos authentication. Grabs credentials from ccache file (KRB5CCNAME) based on target parameters. If valid credentials cannot be found, it will use the ones specified in the command line')
-    group.add_argument('-aesKey', action="store", metavar = "hex key", help='AES key to use for Kerberos Authentication (128 or 256 bits)')
+    group.add_argument('-k', action="store_true", help='Use Kerberos authentication. Grabs credentials from ccache file '
+                                                       '(KRB5CCNAME) based on target parameters. If valid credentials '
+                                                       'cannot be found, it will use the ones specified in the command '
+                                                       'line')
+    group.add_argument('-aesKey', action="store", metavar = "hex key", help='AES key to use for Kerberos Authentication '
+                                                                            '(128 or 256 bits)')
+
+    group = parser.add_argument_group('connection')
+
+    group.add_argument('-dc-ip', action='store', metavar="ip address",
+                       help='IP Address of the domain controller. If ommited it use the domain part (FQDN) specified in '
+                            'the target parameter')
+    group.add_argument('-target-ip', action='store', metavar="ip address",
+                       help='IP Address of the target machine. If ommited it will use whatever was specified as target. '
+                            'This is useful when target is the NetBIOS name and you cannot resolve it')
+    group.add_argument('-port', choices=['139', '445'], nargs='?', default='445', metavar="destination port",
+                       help='Destination port to connect to SMB Server')
 
     if len(sys.argv)==1:
         parser.print_help()
@@ -470,12 +504,16 @@ def main():
         logging.getLogger().setLevel(logging.INFO)
 
     import re
-    domain, username, password, address = re.compile('(?:(?:([^/@:]*)/)?([^@:]*)(?::([^@]*))?@)?(.*)').match(options.target).groups('')
+    domain, username, password, address = re.compile('(?:(?:([^/@:]*)/)?([^@:]*)(?::([^@]*))?@)?(.*)').match(
+        options.target).groups('')
 
     #In case the password contains '@'
     if '@' in address:
         password = password + '@' + address.rpartition('@')[0]
         address = address.rpartition('@')[2]
+
+    if options.target_ip is None:
+        options.target_ip = address
 
     if domain is None:
         domain = ''
@@ -494,9 +532,9 @@ def main():
         nthash = ''
  
     try: 
-        smbClient = SMBConnection(address, address)
+        smbClient = SMBConnection(address, options.target_ip, sess_port=int(options.port))
         if options.k is True:
-            smbClient.kerberosLogin(username, password, domain, lmhash, nthash, options.aesKey )
+            smbClient.kerberosLogin(username, password, domain, lmhash, nthash, options.aesKey, options.dc_ip )
         else:
             smbClient.login(username, password, domain, lmhash, nthash)
 

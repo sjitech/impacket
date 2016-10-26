@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -26,6 +26,7 @@
 #    not used, returning RPC_E_DISCONNECTED
 #
 
+import socket
 from struct import pack
 from threading import Timer, currentThread
 
@@ -943,7 +944,7 @@ class DCOMConnection:
     PORTMAPS = {}
 
     def __init__(self, target, username='', password='', domain='', lmhash='', nthash='', aesKey='', TGT=None, TGS=None,
-                 authLevel=RPC_C_AUTHN_LEVEL_PKT_PRIVACY, oxidResolver=False, doKerberos=False):
+                 authLevel=RPC_C_AUTHN_LEVEL_PKT_PRIVACY, oxidResolver=False, doKerberos=False, kdcHost=None):
         self.__target = target
         self.__userName = username
         self.__password = password
@@ -957,6 +958,7 @@ class DCOMConnection:
         self.__portmap = None
         self.__oxidResolver = oxidResolver
         self.__doKerberos = doKerberos
+        self.__kdcHost = kdcHost
         self.initConnection()
 
     @classmethod
@@ -1041,6 +1043,7 @@ class DCOMConnection:
             # This method exists only for selected protocol sequences.
             rpctransport.set_credentials(self.__userName, self.__password, self.__domain, self.__lmhash, self.__nthash,
                                          self.__aesKey, self.__TGT, self.__TGS)
+            rpctransport.set_kerberos(self.__doKerberos, self.__kdcHost)
         self.__portmap = rpctransport.get_dce_rpc()
         self.__portmap.set_auth_level(self.__authLevel)
         if self.__doKerberos is True:
@@ -1191,6 +1194,24 @@ class INTERFACE:
     def set_cinstance(self, cinstance):
         self.__cinstance = cinstance
 
+    def is_fdqn(self):
+        # I will assume the following
+        # If I can't socket.inet_aton() then it's not an IPv4 address
+        # Same for ipv6, but since socket.inet_pton is not available in Windows, I'll look for ':'. There can't be
+        # an FQDN with ':'
+        # Is it isn't both, then it is a FDQN
+        try:
+            socket.inet_aton(self.__target)
+        except:
+            # Not an IPv4
+            try:
+                self.__target.index(':')
+            except:
+                # Not an IPv6, it's a FDQN
+                return True
+        return False
+
+
     def connect(self, iid = None):
         if INTERFACE.CONNECTIONS.has_key(self.__target) is True:
             if INTERFACE.CONNECTIONS[self.__target].has_key(currentThread().getName()) and \
@@ -1208,6 +1229,8 @@ class INTERFACE:
                 stringBindings = self.get_cinstance().get_string_bindings()
                 # No OXID present, we should create a new connection and store it
                 stringBinding = None
+                isTargetFDQN = self.is_fdqn()
+                LOG.debug('Target system is %s and isFDQN is %s' % (self.get_target(), isTargetFDQN))
                 for strBinding in stringBindings:
                     # Here, depending on the get_target() value several things can happen
                     # 1) it's an IPv4 address
@@ -1229,7 +1252,7 @@ class INTERFACE:
                             stringBinding = 'ncacn_ip_tcp:' + strBinding['aNetworkAddr'][:-1]
                             break
                         # If get_target() is a FQDN, does it match the hostname?
-                        elif binding.upper().find(self.get_target().upper().partition('.')[0]) >= 0:
+                        elif isTargetFDQN and binding.upper().find(self.get_target().upper().partition('.')[0]) >= 0:
                             # Here we replace the aNetworkAddr with self.get_target()
                             # This is to help resolving the target system name.
                             # self.get_target() has been resolved already otherwise we wouldn't be here whereas
@@ -1239,10 +1262,16 @@ class INTERFACE:
                             break
 
                 LOG.debug('StringBinding chosen: %s' % stringBinding)
+                if stringBinding is None:
+                    # Something wen't wrong, let's just report it
+                    raise Exception('Can\'t find a valid stringBinding to connect')
+
                 dcomInterface = transport.DCERPCTransportFactory(stringBinding)
                 if hasattr(dcomInterface, 'set_credentials'):
                     # This method exists only for selected protocol sequences.
                     dcomInterface.set_credentials(*DCOMConnection.PORTMAPS[self.__target].get_credentials())
+                    dcomInterface.set_kerberos(DCOMConnection.PORTMAPS[self.__target].get_rpc_transport().get_kerberos(),
+                                               DCOMConnection.PORTMAPS[self.__target].get_rpc_transport().get_kdcHost())
                 dcomInterface.set_connect_timeout(300)
                 dce = dcomInterface.get_dce_rpc()
 
@@ -1536,7 +1565,7 @@ class IActivation:
 
         classInstance = CLASS_INSTANCE(ORPCthis, stringBindings)
         return IRemUnknown2(INTERFACE(classInstance, ''.join(resp['ppInterfaceData'][0]['abData']), ipidRemUnknown,
-                                      target=self.__portmap.get_rpc_transport().get_dip()))
+                                      target=self.__portmap.get_rpc_transport().getRemoteHost()))
 
 
 # 3.1.2.5.2.2 IRemoteSCMActivator Methods
@@ -1704,7 +1733,7 @@ class IRemoteSCMActivator:
         classInstance.set_auth_level(scmr['remoteReply']['authnHint'])
         classInstance.set_auth_type(self.__portmap.get_auth_type())
         return IRemUnknown2(INTERFACE(classInstance, ''.join(propsOut['ppIntfData'][0]['abData']), ipidRemUnknown,
-                                      target=self.__portmap.get_rpc_transport().get_dip()))
+                                      target=self.__portmap.get_rpc_transport().getRemoteHost()))
 
     def RemoteCreateInstance(self, clsId, iid):
         # Only supports one interface at a time
@@ -1870,4 +1899,4 @@ class IRemoteSCMActivator:
         classInstance.set_auth_level(scmr['remoteReply']['authnHint'])
         classInstance.set_auth_type(self.__portmap.get_auth_type())
         return IRemUnknown2(INTERFACE(classInstance, ''.join(propsOut['ppIntfData'][0]['abData']), ipidRemUnknown,
-                                      target=self.__portmap.get_rpc_transport().get_dip()))
+                                      target=self.__portmap.get_rpc_transport().getRemoteHost()))

@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -19,6 +19,7 @@
 
 import logging
 import socket
+import sys
 from binascii import unhexlify
 from Crypto.Cipher import ARC4
 
@@ -55,8 +56,8 @@ MSRPC_CO_CANCEL = 0x12
 MSRPC_ORPHANED  = 0x13
 
 # MS/RPC Packet Flags
-MSRPC_FIRSTFRAG     = 0x01
-MSRPC_LASTFRAG      = 0x02
+PFC_FIRST_FRAG     = 0x01
+PFC_LAST_FRAG      = 0x02
 
 # For PDU types bind, bind_ack, alter_context, and
 # alter_context_resp, this flag MUST be interpreted as PFC_SUPPORT_HEADER_SIGN
@@ -66,12 +67,11 @@ MSRPC_SUPPORT_SIGN  = 0x04
 #remaining PDU types, this flag MUST be interpreted as PFC_PENDING_CANCEL.
 MSRPC_PENDING_CANCEL= 0x04
 
-MSRPC_NOTAFRAG      = 0x04
-MSRPC_RECRESPOND    = 0x08
-MSRPC_NOMULTIPLEX   = 0x10
-MSRPC_NOTFORIDEMP   = 0x20
-MSRPC_NOTFORBCAST   = 0x40
-MSRPC_NOUUID        = 0x80
+PFC_RESERVED_1      = 0x08
+PFC_CONC_MPX        = 0x10
+PFC_DID_NOT_EXECUTE = 0x20
+PFC_MAYBE           = 0x40
+PFC_OBJECT_UUID     = 0x80
 
 # Auth Types - Security Providers
 RPC_C_AUTHN_NONE          = 0x00
@@ -636,7 +636,7 @@ class MSRPCHeader(Structure):
         if data is None:
             self['ver_major'] = 5
             self['ver_minor'] = 0
-            self['flags'] = MSRPC_FIRSTFRAG | MSRPC_LASTFRAG 
+            self['flags'] = PFC_FIRST_FRAG | PFC_LAST_FRAG
             self['type'] = MSRPC_REQUEST
             self.__frag_len_set = 0
             self['auth_len'] = 0
@@ -646,7 +646,7 @@ class MSRPCHeader(Structure):
             self['pad'] = ''
 
     def get_header_size(self):
-        return self._SIZE + (16 if (self["flags"] & MSRPC_NOUUID) > 0 else 0)
+        return self._SIZE + (16 if (self["flags"] & PFC_OBJECT_UUID) > 0 else 0)
 
     def get_packet(self):
         if self['auth_data'] != '':
@@ -787,7 +787,7 @@ class DCERPC:
     def __init__(self,transport):
         self._transport = transport
         self.set_ctx_id(0)
-        self._max_frag = None
+        self._max_user_frag = None
         self.set_default_max_fragment_size()
         self._ctx = None
 
@@ -810,11 +810,11 @@ class DCERPC:
         if fragment_size == -1:
             self.set_default_max_fragment_size()
         else:
-            self._max_frag = fragment_size
+            self._max_user_frag = fragment_size
 
     def set_default_max_fragment_size(self):
         # default is 0: don'fragment. v4 will override this method
-        self._max_frag = 0
+        self._max_user_frag = 0
 
     def send(self, data): raise RuntimeError, 'virtual method. Not implemented in subclass'
     def recv(self): raise RuntimeError, 'virtual method. Not implemented in subclass'
@@ -835,12 +835,11 @@ class DCERPC:
 
         self.call(request.opnum, request, uuid)
         answer = self.recv()
-        try:
-            module = __import__(request.__module__.split('.')[-1], globals(), locals(), -1)
-        except:
-            # Try the subdirectories
-            module = __import__('%s.%s' % (request.__module__.split('.')[-2],request.__module__.split('.')[-1]) , globals(), locals(), -1)
-        respClass = getattr(module, request.__class__.__name__+'Response')
+
+        __import__(request.__module__)
+        module = sys.modules[request.__module__]
+        respClass = getattr(module, request.__class__.__name__ + 'Response')
+
         if  answer[-4:] != '\x00\x00\x00\x00' and checkError is True:
             error_code = unpack('<L', answer[-4:])[0]
             if rpc_status_codes.has_key(error_code):
@@ -977,12 +976,18 @@ class DCERPC_v5(DCERPC):
                 self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash, self.__aesKey, self.__TGT, self.__TGS = self._transport.get_credentials()
 
             if self.__auth_type == RPC_C_AUTHN_WINNT:
-                auth = ntlm.getNTLMSSPType1('', '', signingRequired = True, use_ntlmv2 = self._transport.doesSupportNTLMv2())
+                auth = ntlm.getNTLMSSPType1('', '', signingRequired=True,
+                                            use_ntlmv2=self._transport.doesSupportNTLMv2())
             elif self.__auth_type == RPC_C_AUTHN_NETLOGON:
                 from impacket.dcerpc.v5 import nrpc
-                auth = nrpc.getSSPType1(self.__username[:-1], self.__domain, signingRequired = True)
+                auth = nrpc.getSSPType1(self.__username[:-1], self.__domain, signingRequired=True)
             elif self.__auth_type == RPC_C_AUTHN_GSS_NEGOTIATE:
-                self.__cipher, self.__sessionKey, auth = kerberosv5.getKerberosType1(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash, self.__aesKey, self.__TGT, self.__TGS, self._transport.get_dip())  
+                self.__cipher, self.__sessionKey, auth = kerberosv5.getKerberosType1(self.__username, self.__password,
+                                                                                     self.__domain, self.__lmhash,
+                                                                                     self.__nthash, self.__aesKey,
+                                                                                     self.__TGT, self.__TGS,
+                                                                                     self._transport.getRemoteHost(),
+                                                                                     self._transport.get_kdcHost())
             else:
                 raise DCERPCException('Unsupported auth_type 0x%x' % self.__auth_type)
 
@@ -1010,9 +1015,13 @@ class DCERPC_v5(DCERPC):
 
         if resp['type'] == MSRPC_BINDACK or resp['type'] == MSRPC_ALTERCTX_R:
             bindResp = MSRPCBindAck(str(resp))
-        elif resp['type'] == MSRPC_BINDNAK:
-            resp = MSRPCBindNak(resp['pduData'])
-            status_code = resp['RejectedReason']
+        elif resp['type'] == MSRPC_BINDNAK or resp['type'] == MSRPC_FAULT:
+            if resp['type'] == MSRPC_FAULT:
+                resp = MSRPCRespHeader(str(resp))
+                status_code = unpack('<L', resp['pduData'][:4])[0]
+            else:
+                resp = MSRPCBindNak(resp['pduData'])
+                status_code = resp['RejectedReason']
             if rpc_status_codes.has_key(status_code):
                 raise DCERPCException(error_code = status_code)
             elif rpc_provider_reason.has_key(status_code):
@@ -1038,22 +1047,28 @@ class DCERPC_v5(DCERPC):
             # Save the transfer syntax for later use
             self.transfer_syntax = ctxItems['TransferSyntax'] 
 
-        self.__max_xmit_size = bindResp['max_tfrag']
+        # The received transmit size becomes the client's receive size, and the received receive size becomes the client's transmit size.
+        self.__max_xmit_size = bindResp['max_rfrag']
 
         if self.__auth_level != RPC_C_AUTHN_LEVEL_NONE:
             if self.__auth_type == RPC_C_AUTHN_WINNT:
-                response, self.__sessionKey = ntlm.getNTLMSSPType3(auth, bindResp['auth_data'], self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash, use_ntlmv2 = self._transport.doesSupportNTLMv2())
+                response, self.__sessionKey = ntlm.getNTLMSSPType3(auth, bindResp['auth_data'], self.__username,
+                                                                   self.__password, self.__domain, self.__lmhash,
+                                                                   self.__nthash,
+                                                                   use_ntlmv2=self._transport.doesSupportNTLMv2())
                 self.__flags = response['flags']
             elif self.__auth_type == RPC_C_AUTHN_NETLOGON:
                 response = None
             elif self.__auth_type == RPC_C_AUTHN_GSS_NEGOTIATE:
-                self.__cipher, self.__sessionKey, response = kerberosv5.getKerberosType3(self.__cipher, self.__sessionKey, bindResp['auth_data'])
+                self.__cipher, self.__sessionKey, response = kerberosv5.getKerberosType3(self.__cipher,
+                                                                                         self.__sessionKey,
+                                                                                         bindResp['auth_data'])
 
             self.__sequence = 0
 
             if self.__auth_level in (RPC_C_AUTHN_LEVEL_CONNECT, RPC_C_AUTHN_LEVEL_PKT_INTEGRITY, RPC_C_AUTHN_LEVEL_PKT_PRIVACY):
                 if self.__auth_type == RPC_C_AUTHN_WINNT:
-                    if self.__flags & ntlm.NTLMSSP_NTLM2_KEY:
+                    if self.__flags & ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY:
                         self.__clientSigningKey = ntlm.SIGNKEY(self.__flags, self.__sessionKey)
                         self.__serverSigningKey = ntlm.SIGNKEY(self.__flags, self.__sessionKey,"Server")
                         self.__clientSealingKey = ntlm.SEALKEY(self.__flags, self.__sessionKey)
@@ -1117,6 +1132,9 @@ class DCERPC_v5(DCERPC):
 
     def _transport_send(self, rpc_packet, forceWriteAndx = 0, forceRecv = 0):
         rpc_packet['ctx_id'] = self._ctx
+        rpc_packet['sec_trailer'] = ''
+        rpc_packet['auth_data'] = ''
+
         if self.__auth_level in [RPC_C_AUTHN_LEVEL_PKT_INTEGRITY, RPC_C_AUTHN_LEVEL_PKT_PRIVACY]:
             # Dummy verifier, just for the calculations
             sec_trailer = SEC_TRAILER()
@@ -1127,8 +1145,8 @@ class DCERPC_v5(DCERPC):
 
             pad = (4 - (len(rpc_packet.get_packet()) % 4)) % 4
             if pad != 0:
-               rpc_packet['pduData'] += '\xBB'*pad
-               sec_trailer['auth_pad_len']=pad
+                rpc_packet['pduData'] += '\xBB'*pad
+                sec_trailer['auth_pad_len']=pad
 
             rpc_packet['sec_trailer'] = str(sec_trailer)
             rpc_packet['auth_data'] = ' '*16
@@ -1136,7 +1154,7 @@ class DCERPC_v5(DCERPC):
             plain_data = rpc_packet['pduData']
             if self.__auth_level == RPC_C_AUTHN_LEVEL_PKT_PRIVACY:
                 if self.__auth_type == RPC_C_AUTHN_WINNT:
-                    if self.__flags & ntlm.NTLMSSP_NTLM2_KEY:
+                    if self.__flags & ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY:
                         # When NTLM2 is on, we sign the whole pdu, but encrypt just
                         # the data, not the dcerpc header. Weird..
                         sealedMessage, signature =  ntlm.SEAL(self.__flags, 
@@ -1163,10 +1181,10 @@ class DCERPC_v5(DCERPC):
                 rpc_packet['pduData'] = sealedMessage
             elif self.__auth_level == RPC_C_AUTHN_LEVEL_PKT_INTEGRITY: 
                 if self.__auth_type == RPC_C_AUTHN_WINNT:
-                    if self.__flags & ntlm.NTLMSSP_NTLM2_KEY:
+                    if self.__flags & ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY:
                         # Interesting thing.. with NTLM2, what is is signed is the 
                         # whole PDU, not just the data
-                        signature =  ntlm.SIGN(self.__flags, 
+                        signature =  ntlm.SIGN(self.__flags,
                                self.__clientSigningKey, 
                                rpc_packet.get_packet()[:-16], 
                                self.__sequence, 
@@ -1199,33 +1217,61 @@ class DCERPC_v5(DCERPC):
             # Must be an Impacket, transform to structure
             data = DCERPC_RawCall(data.OP_NUM, data.get_packet())
 
+        try:
+            if data['uuid'] != '':
+                data['flags'] |= PFC_OBJECT_UUID
+        except:
+            # Structure doesn't have uuid
+            pass
         data['ctx_id'] = self._ctx
         data['call_id'] = self.__callid
+        data['alloc_hint'] = len(data['pduData'])
+        # We should fragment PDUs if:
+        # 1) Payload exceeds __max_xmit_size received during BIND response
+        # 2) We'e explicitly fragmenting packets with lower values
+        should_fragment = False
 
-        max_frag = self._max_frag
-        if len(data['pduData']) > self.__max_xmit_size - 32:
-            max_frag = self.__max_xmit_size - 32    # XXX: 32 is a safe margin for auth data
+        # Let's decide what will drive fragmentation for this request
+        if self._max_user_frag > 0:
+            # User set a frag size, let's compare it with the max transmit size agreed when binding the interface
+            fragment_size = min(self._max_user_frag, self.__max_xmit_size)
+        else:
+            fragment_size = self.__max_xmit_size
 
-        if self._max_frag:
-            max_frag = min(max_frag, self._max_frag)
-        if max_frag and len(data['pduData']) > 0:
+        # Sanity check. Fragmentation can't be too low, otherwise sec_trailer won't fit
+
+        if self.__auth_level in [RPC_C_AUTHN_LEVEL_PKT_INTEGRITY, RPC_C_AUTHN_LEVEL_PKT_PRIVACY]:
+            if fragment_size <= 8:
+                # Minimum pdu fragment size is 8, important when doing PKT_INTEGRITY/PRIVACY. We need a minimum size of 8
+                # (Kerberos)
+                fragment_size = 8
+
+        # ToDo: Better calculate the size needed. Now I'm setting a number that surely is enough for Kerberos and NTLM
+        # ToDo: trailers, both for INTEGRITY and PRIVACY. This means we're not truly honoring the user's frag request.
+        if len(data['pduData']) + 128 > fragment_size:
+            should_fragment = True
+            if fragment_size+128 > self.__max_xmit_size:
+                fragment_size = self.__max_xmit_size - 128
+
+        if should_fragment:
             packet = data['pduData']
             offset = 0
-            DCERPC_RawCall(data['op_num'])
 
             while 1:
-                toSend = packet[offset:offset+max_frag]
+                toSend = packet[offset:offset+fragment_size]
                 if not toSend:
                     break
-                flags = 0
                 if offset == 0:
-                    flags |= MSRPC_FIRSTFRAG
+                    data['flags'] |= PFC_FIRST_FRAG
+                else:
+                    data['flags'] &= (~PFC_FIRST_FRAG)
                 offset += len(toSend)
-                if offset == len(packet):
-                    flags |= MSRPC_LASTFRAG
-                data['flags'] = flags
+                if offset >= len(packet):
+                    data['flags'] |= PFC_LAST_FRAG
+                else:
+                    data['flags'] &= (~PFC_LAST_FRAG)
                 data['pduData'] = toSend
-                self._transport_send(data, forceWriteAndx = 1, forceRecv = flags & MSRPC_LASTFRAG)
+                self._transport_send(data, forceWriteAndx = 1, forceRecv =data['flags'] & PFC_LAST_FRAG)
         else:
             self._transport_send(data)
         self.__callid += 1
@@ -1261,7 +1307,7 @@ class DCERPC_v5(DCERPC):
                     else:
                         raise DCERPCException('Unknown DCE RPC fault status code: %.8x' % status_code)
 
-            if response_header['flags'] & MSRPC_LASTFRAG:
+            if response_header['flags'] & PFC_LAST_FRAG:
                 # No need to reassembly DCERPC
                 finished = True
             else:
@@ -1278,7 +1324,7 @@ class DCERPC_v5(DCERPC):
 
                 if sec_trailer['auth_level'] == RPC_C_AUTHN_LEVEL_PKT_PRIVACY:
                     if self.__auth_type == RPC_C_AUTHN_WINNT:
-                        if self.__flags & ntlm.NTLMSSP_NTLM2_KEY:
+                        if self.__flags & ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY:
                             # TODO: FIX THIS, it's not calculating the signature well
                             # Since I'm not testing it we don't care... yet
                             answer, signature =  ntlm.SEAL(self.__flags, 
@@ -1306,12 +1352,13 @@ class DCERPC_v5(DCERPC):
                         self.__sequence += 1
                     elif self.__auth_type == RPC_C_AUTHN_GSS_NEGOTIATE:
                         if self.__sequence > 0:
-                            answer, cfounder = self.__gss.GSS_Unwrap(self.__sessionKey, answer, self.__sequence, direction='init', authData=auth_data)
+                            answer, cfounder = self.__gss.GSS_Unwrap(self.__sessionKey, answer, self.__sequence,
+                                                                     direction='init', authData=auth_data)
 
                 elif sec_trailer['auth_level'] == RPC_C_AUTHN_LEVEL_PKT_INTEGRITY:
                     if self.__auth_type == RPC_C_AUTHN_WINNT:
                         ntlmssp = auth_data[12:]
-                        if self.__flags & ntlm.NTLMSSP_NTLM2_KEY:
+                        if self.__flags & ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY:
                             signature =  ntlm.SIGN(self.__flags, 
                                     self.__serverSigningKey, 
                                     answer, 
@@ -1350,7 +1397,8 @@ class DCERPC_v5(DCERPC):
     def alter_ctx(self, newUID, bogus_binds = 0):
         answer = self.__class__(self._transport)
 
-        answer.set_credentials(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash, self.__aesKey, self.__TGT, self.__TGS )
+        answer.set_credentials(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash,
+                               self.__aesKey, self.__TGT, self.__TGS)
         answer.set_auth_type(self.__auth_type)
         answer.set_auth_level(self.__auth_level)
 
@@ -1365,7 +1413,7 @@ class DCERPC_RawCall(MSRPCRequestHeader):
         self['op_num'] = op_num
         self['pduData'] = data
         if uuid is not None:
-            self['flags'] |= MSRPC_NOUUID
+            self['flags'] |= PFC_OBJECT_UUID
             self['uuid'] = uuid
 
     def setData(self, data):
@@ -1403,7 +1451,8 @@ class TypeSerialization1(NDRSTRUCT):
         ('PrivateHeader', PrivateHeader),
     )
     def getData(self, soFar = 0):
-        self['PrivateHeader']['ObjectBufferLength'] = len(NDRSTRUCT.getData(self, soFar))+len(NDRSTRUCT.getDataReferents(self, soFar))-len(self['CommonHeader'])-len(self['PrivateHeader'])
+        self['PrivateHeader']['ObjectBufferLength'] = len(NDRSTRUCT.getData(self, soFar)) + len(
+            NDRSTRUCT.getDataReferents(self, soFar)) - len(self['CommonHeader']) - len(self['PrivateHeader'])
         return NDRSTRUCT.getData(self, soFar)
 
 class DCERPCServer(Thread):
@@ -1468,7 +1517,7 @@ class DCERPCServer(Thread):
             while len(response_data) < response_header['frag_len']:
                response_data += self._clientSock.recv(response_header['frag_len']-len(response_data))
             response_header = MSRPCRespHeader(response_data)
-            if response_header['flags'] & MSRPC_LASTFRAG:
+            if response_header['flags'] & PFC_LAST_FRAG:
                 # No need to reassembly DCERPC
                 finished = True
             answer = response_header['pduData']
@@ -1519,10 +1568,10 @@ class DCERPCServer(Thread):
                     break
                 flags  = 0
                 if offset == 0:
-                    flags |= MSRPC_FIRSTFRAG
+                    flags |= PFC_FIRST_FRAG
                 offset += len(toSend)
                 if offset == len(packet):
-                    flags |= MSRPC_LASTFRAG
+                    flags |= PFC_LAST_FRAG
                 data['flags']   = flags
                 data['pduData'] = toSend
                 self._clientSock.send(data.get_packet())

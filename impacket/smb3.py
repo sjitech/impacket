@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2015 CORE Security Technologies)
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -116,13 +116,14 @@ class SessionError(Exception):
 
 
 class SMB3:
-    def __init__(self, remote_name, remote_host, my_name = None, host_type = nmb.TYPE_SERVER, sess_port = 445, timeout=60, UDP = 0, preferredDialect = None, session = None):
+    def __init__(self, remote_name, remote_host, my_name=None, host_type=nmb.TYPE_SERVER, sess_port=445, timeout=60,
+                 UDP=0, preferredDialect=None, session=None):
 
         # [MS-SMB2] Section 3
         self.RequireMessageSigning = False    #
         self.ConnectionTable = {}
         self.GlobalFileTable = {}
-        self.ClientGuid = ''                  #
+        self.ClientGuid = ''.join([random.choice(string.letters) for i in range(16)])
         # Only for SMB 3.0
         self.EncryptionAlgorithmList = ['AES-CCM']
         self.MaxDialect = []
@@ -160,6 +161,7 @@ class SMB3:
             'ServerSecurityMode'       : 0,    #
             # Outside the protocol
             'ServerIP'                 : '',    #
+            'ClientName'               : '',    #
         }
    
         self._Session = {
@@ -194,6 +196,8 @@ class SMB3:
         self._timeout = timeout
         self._Connection['ServerIP'] = remote_host
         self._NetBIOSSession = None
+        self._preferredDialect = preferredDialect
+        self._doKerberos = False
 
         self.__userName = ''
         self.__password = ''
@@ -210,8 +214,15 @@ class SMB3:
         else:
            self._Connection['ServerName'] = remote_name
 
+        # This is on purpose. I'm still not convinced to do a socket.gethostname() if not specified
+        if my_name is None:
+            self._Connection['ClientName'] = ''
+        else:
+            self._Connection['ClientName'] = my_name
+
         if session is None:
             if not my_name:
+                # If destination port is 139 yes, there's some client disclosure
                 my_name = socket.gethostname()
                 i = string.find(my_name, '.')
                 if i > -1:
@@ -239,8 +250,23 @@ class SMB3:
         for i in self._Session.items():
             print "%-40s : %s" % i
 
+    def getKerberos(self):
+        return self._doKerberos
+
     def getServerName(self):
         return self._Session['ServerName']
+
+    def getClientName(self):
+        return self._Session['ClientName']
+
+    def getRemoteName(self):
+        if self._Session['ServerName'] == '':
+            return self._Connection['ServerName']
+        return self._Session['ServerName']
+
+    def setRemoteName(self, name):
+        self._Session['ServerName'] = name
+        return True
 
     def getServerIP(self):
         return self._Connection['ServerIP']
@@ -279,7 +305,6 @@ class SMB3:
 
     def getDialect(self):
         return self._Connection['Dialect']
-
 
     def signSMB(self, packet):
         packet['Signature'] = '\x00'*16
@@ -501,6 +526,7 @@ class SMB3:
         self.__aesKey   = aesKey
         self.__TGT      = TGT
         self.__TGS      = TGS
+        self._doKerberos= True
        
         sessionSetup = SMB2SessionSetup()
         if self.RequireMessageSigning is True:
@@ -674,7 +700,7 @@ class SMB3:
 
         # NTLMSSP
         blob['MechTypes'] = [TypesMech['NTLMSSP - Microsoft NTLM Security Support Provider']]
-        auth = ntlm.getNTLMSSPType1('','', self._Connection['RequireSigning'])
+        auth = ntlm.getNTLMSSPType1(self._Connection['ClientName'],domain, self._Connection['RequireSigning'])
         blob['MechToken'] = str(auth)
 
         sessionSetup['SecurityBufferLength'] = len(blob)
@@ -918,6 +944,8 @@ class SMB3:
 
         if createContexts is not None:
             smb2Create['Buffer'] += createContexts
+            smb2Create['CreateContextsOffset'] = len(SMB2Packet()) + SMB2Create.SIZE + smb2Create['NameLength']
+            smb2Create['CreateContextsLength'] = len(createContexts)
         else:
             smb2Create['CreateContextsOffset'] = 0
             smb2Create['CreateContextsLength'] = 0
@@ -1536,9 +1564,11 @@ class SMB3:
     # NOTE: It is strongly recommended not to use these commands
     # when implementing new client calls.
     get_server_name            = getServerName
+    get_client_name            = getClientName
     get_server_domain          = getServerDomain
     get_server_dns_domain_name = getServerDNSDomainName
-    get_remote_name            = getServerName
+    get_remote_name            = getRemoteName
+    set_remote_name            = setRemoteName
     get_remote_host            = getServerIP
     get_server_os              = getServerOS
     get_server_os_major        = getServerOSMajor

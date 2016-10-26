@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -117,8 +117,9 @@ class DCERPCTransport:
 
     DCERPC_class = DCERPC_v5
 
-    def __init__(self, dstip, dstport):
-        self.__dstip = dstip
+    def __init__(self, remoteName, dstport):
+        self.__remoteName = remoteName
+        self.__remoteHost = remoteName
         self.__dstport = dstport
         self._max_send_frag = None
         self._max_recv_frag = None
@@ -133,6 +134,7 @@ class DCERPCTransport:
         self._aesKey   = None
         self._TGT      = None
         self._TGS      = None
+        self._kdcHost  = None
         self.set_credentials('','')
 
     def connect(self):
@@ -151,11 +153,19 @@ class DCERPCTransport:
     def set_connect_timeout(self, timeout):
         self.__connect_timeout = timeout
 
-    def get_dip(self):
-        return self.__dstip
-    def set_dip(self, dip):
+    def getRemoteName(self):
+        return self.__remoteName
+
+    def setRemoteName(self, remoteName):
         """This method only makes sense before connection for most protocols."""
-        self.__dstip = dip
+        self.__remoteName = remoteName
+
+    def getRemoteHost(self):
+        return self.__remoteHost
+
+    def setRemoteHost(self, remoteHost):
+        """This method only makes sense before connection for most protocols."""
+        self.__remoteHost = remoteHost
 
     def get_dport(self):
         return self.__dstport
@@ -164,17 +174,21 @@ class DCERPCTransport:
         self.__dstport = dport
 
     def get_addr(self):
-        return self.get_dip(), self.get_dport()
+        return self.getRemoteHost(), self.get_dport()
     def set_addr(self, addr):
         """This method only makes sense before connection for most protocols."""
-        self.set_dip(addr[0])
+        self.setRemoteHost(addr[0])
         self.set_dport(addr[1])
 
-    def set_kerberos(self, flag):
+    def set_kerberos(self, flag, kdcHost = None):
         self._doKerberos = flag
+        self._kdcHost = kdcHost
 
     def get_kerberos(self):
         return self._doKerberos
+
+    def get_kdcHost(self):
+        return self._kdcHost
 
     def set_max_fragment_size(self, send_fragment_size):
         # -1 is default fragment size: 0 (don't fragment)
@@ -231,15 +245,15 @@ class UDPTransport(DCERPCTransport):
 
     DCERPC_class = DCERPC_v4
 
-    def __init__(self,dstip, dstport = 135):
-        DCERPCTransport.__init__(self, dstip, dstport)
+    def __init__(self, remoteName, dstport = 135):
+        DCERPCTransport.__init__(self, remoteName, dstport)
         self.__socket = 0
         self.set_connect_timeout(30)
         self.__recv_addr = ''
 
     def connect(self):
         try:
-            af, socktype, proto, canonname, sa = socket.getaddrinfo(self.get_dip(), self.get_dport(), 0, socket.SOCK_DGRAM)[0]
+            af, socktype, proto, canonname, sa = socket.getaddrinfo(self.getRemoteHost(), self.get_dport(), 0, socket.SOCK_DGRAM)[0]
             self.__socket = socket.socket(af, socktype, proto)
             self.__socket.settimeout(self.get_connect_timeout())
         except socket.error, msg:
@@ -257,7 +271,7 @@ class UDPTransport(DCERPCTransport):
         return 1
 
     def send(self,data, forceWriteAndx = 0, forceRecv = 0):
-        self.__socket.sendto(data,(self.get_dip(),self.get_dport()))
+        self.__socket.sendto(data, (self.getRemoteHost(), self.get_dport()))
 
     def recv(self, forceRecv = 0, count = 0):
         buffer, self.__recv_addr = self.__socket.recvfrom(8192)
@@ -272,17 +286,17 @@ class UDPTransport(DCERPCTransport):
 class TCPTransport(DCERPCTransport):
     """Implementation of ncacn_ip_tcp protocol sequence"""
 
-    def __init__(self, dstip, dstport = 135):
-        DCERPCTransport.__init__(self, dstip, dstport)
+    def __init__(self, remoteName, dstport = 135):
+        DCERPCTransport.__init__(self, remoteName, dstport)
         self.__socket = 0
         self.set_connect_timeout(30)
 
     def connect(self):
-        af, socktype, proto, canonname, sa = socket.getaddrinfo(self.get_dip(), self.get_dport(), 0, socket.SOCK_STREAM)[0]
+        af, socktype, proto, canonname, sa = socket.getaddrinfo(self.getRemoteHost(), self.get_dport(), 0, socket.SOCK_STREAM)[0]
         self.__socket = socket.socket(af, socktype, proto)
         try:
             self.__socket.settimeout(self.get_connect_timeout())
-            self.__socket.connect((self.get_dip(), self.get_dport()))
+            self.__socket.connect(sa)
         except socket.error, msg:
             self.__socket.close()
             raise DCERPCException("Could not connect: %s" % msg)
@@ -326,7 +340,7 @@ class HTTPTransport(TCPTransport):
     def connect(self):
         TCPTransport.connect(self)
 
-        self.get_socket().send('RPC_CONNECT ' + self.get_dip() + ':593 HTTP/1.0\r\n\r\n')
+        self.get_socket().send('RPC_CONNECT ' + self.getRemoteHost() + ':593 HTTP/1.0\r\n\r\n')
         data = self.get_socket().recv(8192)
         if data[10:13] != '200':
             raise DCERPCException("Service not supported.")
@@ -334,17 +348,20 @@ class HTTPTransport(TCPTransport):
 class SMBTransport(DCERPCTransport):
     """Implementation of ncacn_np protocol sequence"""
 
-    def __init__(self, dstip, dstport=445, filename='', username='', password='', domain='', lmhash='', nthash='',
-                 aesKey='', TGT=None, TGS=None, remote_name='', smb_connection=0, doKerberos=False):
-        DCERPCTransport.__init__(self, dstip, dstport)
+    def __init__(self, remoteName, dstport=445, filename='', username='', password='', domain='', lmhash='', nthash='',
+                 aesKey='', TGT=None, TGS=None, remote_host='', smb_connection=0, doKerberos=False, kdcHost=None):
+        DCERPCTransport.__init__(self, remoteName, dstport)
         self.__socket = None
         self.__tid = 0
         self.__filename = filename
         self.__handle = 0
         self.__pending_recv = 0
         self.set_credentials(username, password, domain, lmhash, nthash, aesKey, TGT, TGS)
-        self.__remote_name = remote_name
         self._doKerberos = doKerberos
+        self._kdcHost = kdcHost
+
+        if remote_host != '':
+            self.setRemoteHost(remote_host)
 
         if smb_connection == 0:
             self.__existing_smb = False
@@ -353,35 +370,26 @@ class SMBTransport(DCERPCTransport):
             self.set_credentials(*smb_connection.getCredentials())
 
         self.__prefDialect = None
-
-        if isinstance(smb_connection, smb.SMB):
-            # Backward compatibility hack, let's return a
-            # SMBBackwardCompatibilityTransport instance
-            return SMBBackwardCompatibilityTransport(filename = filename, smb_server = smb_connection)
-        else:
-            self.__smb_connection = smb_connection
+        self.__smb_connection = smb_connection
 
     def preferred_dialect(self, dialect):
         self.__prefDialect = dialect
 
     def setup_smb_connection(self):
         if not self.__smb_connection:
-            if self.__remote_name == '':
-                if self.get_dport() == nmb.NETBIOS_SESSION_PORT:
-                    self.__smb_connection = SMBConnection('*SMBSERVER', self.get_dip(), sess_port = self.get_dport(),preferredDialect = self.__prefDialect)
-                else:
-                    self.__smb_connection = SMBConnection(self.get_dip(), self.get_dip(), sess_port = self.get_dport(),preferredDialect = self.__prefDialect)
-            else:
-                self.__smb_connection = SMBConnection(self.__remote_name, self.get_dip(), sess_port = self.get_dport(),preferredDialect = self.__prefDialect)
+            self.__smb_connection = SMBConnection(self.getRemoteName(), self.getRemoteHost(), sess_port=self.get_dport(),
+                                                  preferredDialect=self.__prefDialect)
 
     def connect(self):
         # Check if we have a smb connection already setup
         if self.__smb_connection == 0:
-           self.setup_smb_connection()
-           if self._doKerberos is False:
-               self.__smb_connection.login(self._username, self._password, self._domain, self._lmhash, self._nthash)
-           else:
-               self.__smb_connection.kerberosLogin(self._username, self._password, self._domain, self._lmhash, self._nthash, self._aesKey, TGT=self._TGT, TGS=self._TGS)
+            self.setup_smb_connection()
+            if self._doKerberos is False:
+                self.__smb_connection.login(self._username, self._password, self._domain, self._lmhash, self._nthash)
+            else:
+                self.__smb_connection.kerberosLogin(self._username, self._password, self._domain, self._lmhash,
+                                                    self._nthash, self._aesKey, kdcHost=self._kdcHost, TGT=self._TGT,
+                                                    TGS=self._TGS)
         self.__tid = self.__smb_connection.connectTree('IPC$')
         self.__handle = self.__smb_connection.openFile(self.__tid, self.__filename)
         self.__socket = self.__smb_connection.getSMBServer().get_socket()

@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -290,7 +290,7 @@ if __name__ == '__main__':
     class SPNEGOCipher:
         def __init__(self, flags, randomSessionKey):
             self.__flags = flags
-            if self.__flags & ntlm.NTLMSSP_NTLM2_KEY:
+            if self.__flags & ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY:
                 self.__clientSigningKey = ntlm.SIGNKEY(self.__flags, randomSessionKey)
                 self.__serverSigningKey = ntlm.SIGNKEY(self.__flags, randomSessionKey,"Server")
                 self.__clientSealingKey = ntlm.SEALKEY(self.__flags, randomSessionKey)
@@ -312,7 +312,7 @@ if __name__ == '__main__':
             self.__sequence = 0
 
         def encrypt(self, plain_data):
-            if self.__flags & ntlm.NTLMSSP_NTLM2_KEY:
+            if self.__flags & ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY:
                 # When NTLM2 is on, we sign the whole pdu, but encrypt just
                 # the data, not the dcerpc header. Weird..
                 sealedMessage, signature =  ntlm.SEAL(self.__flags, 
@@ -336,7 +336,7 @@ if __name__ == '__main__':
             return signature, sealedMessage
 
         def decrypt(self, answer):
-            if self.__flags & ntlm.NTLMSSP_NTLM2_KEY:
+            if self.__flags & ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY:
                 # TODO: FIX THIS, it's not calculating the signature well
                 # Since I'm not testing it we don't care... yet
                 answer, signature =  ntlm.SEAL(self.__flags, 
@@ -545,7 +545,8 @@ if __name__ == '__main__':
     logger.init()
     print version.BANNER
 
-    parser = argparse.ArgumentParser(add_help = True, description = "Test whether an account is valid on the target host using the RDP protocol.")
+    parser = argparse.ArgumentParser(add_help = True, description = "Test whether an account is valid on the target "
+                                                                    "host using the RDP protocol.")
 
     parser.add_argument('target', action='store', help='[[domain/]username[:password]@]<targetName or address>')
 

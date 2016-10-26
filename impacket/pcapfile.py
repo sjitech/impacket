@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -16,7 +16,7 @@ O_ICMP = 2
 O_UDP_DATA = 3
 O_ICMP_DATA = 3
 
-MAGIC = "\xD4\xC3\xB2\xA1"
+MAGIC = '"\xD4\xC3\xB2\xA1'
 
 class PCapFileHeader(structure.Structure):
     structure = (

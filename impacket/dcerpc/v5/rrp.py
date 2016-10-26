@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -18,13 +18,13 @@
 #   Helper functions start with "h"<name of the call>.
 #   There are test cases for them too. 
 #
-from struct import unpack
+from struct import unpack, pack
 
 from impacket.dcerpc.v5.ndr import NDRCALL, NDRSTRUCT, NDRPOINTER, NDRUniConformantVaryingArray, NDRUniConformantArray
 from impacket.dcerpc.v5.dtypes import DWORD, UUID, ULONG, LPULONG, BOOLEAN, SECURITY_INFORMATION, PFILETIME, \
     RPC_UNICODE_STRING, FILETIME, NULL, MAXIMUM_ALLOWED, OWNER_SECURITY_INFORMATION, PWCHAR, PRPC_UNICODE_STRING
 from impacket.dcerpc.v5.rpcrt import DCERPCException
-from impacket import system_errors
+from impacket import system_errors, LOG
 from impacket.uuid import uuidtup_to_bin
 
 MSRPC_UUID_RRP = uuidtup_to_bin(('338CD001-2244-31F1-AAAA-900038001003', '1.0'))
@@ -675,6 +675,38 @@ def checkNullString(string):
     else:
         return string
 
+def packValue(valueType, value):
+    if valueType == REG_DWORD:
+        retData = pack('<L', value)
+    elif valueType == REG_DWORD_BIG_ENDIAN:
+        retData = pack('>L', value)
+    elif valueType == REG_EXPAND_SZ:
+        try:
+            retData = value.encode('utf-16le')
+        except UnicodeDecodeError:
+            import sys
+            retData = value.decode(sys.getfilesystemencoding()).encode('utf-16le')
+    elif valueType == REG_MULTI_SZ:
+        try:
+            retData = value.encode('utf-16le')
+        except UnicodeDecodeError:
+            import sys
+            retData = value.decode(sys.getfilesystemencoding()).encode('utf-16le')
+    elif valueType == REG_QWORD:
+        retData = pack('<Q', value)
+    elif valueType == REG_QWORD_LITTLE_ENDIAN:
+        retData = pack('>Q', value)
+    elif valueType == REG_SZ:
+        try:
+            retData = value.encode('utf-16le')
+        except UnicodeDecodeError:
+            import sys
+            retData = value.decode(sys.getfilesystemencoding()).encode('utf-16le')
+    else:
+        retData = value
+
+    return retData
+
 def unpackValue(valueType, value):
     if valueType == REG_DWORD:
         retData = unpack('<L', ''.join(value))[0]
@@ -762,18 +794,40 @@ def hBaseRegEnumKey(dce, hKey, dwIndex, lpftLastWriteTime = NULL):
 
     return dce.request(request)
 
-def hBaseRegEnumValue(dce, hKey, dwIndex):
-    # ToDo, check the result to see whether we need to 
-    # have a bigger buffer for the data to receive
+def hBaseRegEnumValue(dce, hKey, dwIndex, dataLen=256):
     request = BaseRegEnumValue()
     request['hKey'] = hKey
     request['dwIndex'] = dwIndex
-    request['lpValueNameIn'] = ' '*128
-    request['lpData'] = ' '*128
-    request['lpcbData'] = 128
-    request['lpcbLen'] = 128
+    retries = 1
 
-    return dce.request(request)
+    # We need to be aware the size might not be enough, so let's catch ERROR_MORE_DATA exception
+    while True:
+        try:
+            # Only the maximum length field of the lpValueNameIn is used to determine the buffer length to be allocated
+            # by the service. Specify a string with a zero length but maximum length set to the largest buffer size
+            # needed to hold the value names.
+            request.fields['lpValueNameIn'].fields['MaximumLength'] = dataLen*2
+            request.fields['lpValueNameIn'].fields['Data'].fields['Data'].fields['MaximumCount'] = dataLen
+
+            request['lpData'] = ' ' * dataLen
+            request['lpcbData'] = dataLen
+            request['lpcbLen'] = dataLen
+            resp = dce.request(request)
+        except DCERPCSessionError, e:
+            if retries > 1:
+                LOG.debug('Too many retries when calling hBaseRegEnumValue, aborting')
+                raise
+            if e.get_error_code() == system_errors.ERROR_MORE_DATA:
+                # We need to adjust the size
+                retries +=1
+                dataLen = e.get_packet()['lpcbData']
+                continue
+            else:
+                raise
+        else:
+            break
+
+    return resp
 
 def hBaseRegFlushKey(dce, hKey):
     request = BaseRegFlushKey()
@@ -819,17 +873,33 @@ def hBaseRegQueryInfoKey(dce, hKey):
     request.fields['lpClassIn'].fields['Data'].fields['Data'].fields['MaximumCount'] = 1024/2
     return dce.request(request)
 
-def hBaseRegQueryValue(dce, hKey, lpValueName):
-    # ToDo, check the result to see whether we need to 
-    # have a bigger buffer for the data to receive
+def hBaseRegQueryValue(dce, hKey, lpValueName, dataLen=512):
     request = BaseRegQueryValue()
     request['hKey'] = hKey
     request['lpValueName'] = checkNullString(lpValueName)
-    request['lpData'] = ' '*512
-    request['lpcbData'] = 512
-    request['lpcbLen'] = 512
-    resp = dce.request(request)
-    # Returns 
+    retries = 1
+
+    # We need to be aware the size might not be enough, so let's catch ERROR_MORE_DATA exception
+    while True:
+        try:
+            request['lpData'] = ' ' * dataLen
+            request['lpcbData'] = dataLen
+            request['lpcbLen'] = dataLen
+            resp = dce.request(request)
+        except DCERPCSessionError, e:
+            if retries > 1:
+                LOG.debug('Too many retries when calling hBaseRegQueryValue, aborting')
+                raise
+            if e.get_error_code() == system_errors.ERROR_MORE_DATA:
+                # We need to adjust the size
+                dataLen = e.get_packet()['lpcbData']
+                continue
+            else:
+                raise
+        else:
+            break
+
+    # Returns
     # ( dataType, data )
     return resp['lpType'], unpackValue(resp['lpType'], resp['lpData'])
 
@@ -860,11 +930,7 @@ def hBaseRegSetValue(dce, hKey, lpValueName, dwType, lpData):
     request['hKey'] = hKey
     request['lpValueName'] = checkNullString(lpValueName)
     request['dwType'] = dwType
-    try:
-        request['lpData'] = lpData.encode('utf-16le')
-    except UnicodeDecodeError:
-        import sys
-        request['lpData'] = lpData.decode(sys.getfilesystemencoding()).encode('utf-16le')
+    request['lpData'] = packValue(dwType,lpData)
     request['cbData'] = len(request['lpData'])
     return dce.request(request)
 

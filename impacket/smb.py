@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2015 CORE Security Technologies)
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -2325,10 +2325,12 @@ class SMB:
     SMB_SUPPORT_SEARCH_BITS                 = 0x01
     SMB_SHARE_IS_IN_DFS                     = 0x02
 
-    def __init__(self, remote_name, remote_host, my_name = None, host_type = nmb.TYPE_SERVER, sess_port = 445, timeout=None, UDP = 0, session = None, negPacket = None):
+    def __init__(self, remote_name, remote_host, my_name=None, host_type=nmb.TYPE_SERVER, sess_port=445, timeout=None,
+                 UDP=0, session=None, negPacket=None):
         # The uid attribute will be set when the client calls the login() method
         self._uid = 0
         self.__server_name = ''
+        self.__client_name = ''
         self.__server_os = ''
         self.__server_os_major = None
         self.__server_os_minor = None
@@ -2341,6 +2343,8 @@ class SMB:
         self.__isNTLMv2 = True
         self._dialects_parameters = None
         self._dialects_data = None
+        self._doKerberos = False
+
         # Credentials
         self.__userName = ''
         self.__password = ''
@@ -2386,8 +2390,15 @@ class SMB:
         if sess_port == 445 and remote_name == '*SMBSERVER':
            self.__remote_name = remote_host
 
+        # This is on purpose. I'm still not convinced to do a socket.gethostname() if not specified
+        if my_name is None:
+            self.__client_name = ''
+        else:
+            self.__client_name = my_name
+
         if session is None:
             if not my_name:
+                # If destination port is 139 yes, there's some client disclosure
                 my_name = socket.gethostname()
                 i = string.find(my_name, '.')
                 if i > -1:
@@ -2419,8 +2430,15 @@ class SMB:
     def ntlm_supported():
         return False
 
+    def getKerberos(self):
+        return self._doKerberos
+
     def get_remote_name(self):
         return self.__remote_name
+
+    def set_remote_name(self, name):
+        self.__remote_name = name
+        return True
 
     def get_remote_host(self):
         return self.__remote_host
@@ -2591,8 +2609,12 @@ class SMB:
         if negPacket is None:
             smb = NewSMBPacket()
             negSession = SMBCommand(SMB.SMB_COM_NEGOTIATE)
+            flags2 = self.get_flags()[1]
             if extended_security is True:
-                smb['Flags2']=SMB.FLAGS2_EXTENDED_SECURITY
+                self.set_flags(flags2=flags2|SMB.FLAGS2_EXTENDED_SECURITY)
+            else:
+                self.set_flags(flags2=flags2 & (~SMB.FLAGS2_EXTENDED_SECURITY))
+
             negSession['Data'] = '\x02NT LM 0.12\x00'
             smb.addCommand(negSession)
             self.sendSMB(smb)
@@ -2722,6 +2744,9 @@ class SMB:
     def get_server_name(self):
         #return self._dialects_data['ServerName']
         return self.__server_name
+
+    def get_client_name(self):
+        return self.__client_name
 
     def get_session_key(self):
         return self._SigningSessionKey
@@ -3031,6 +3056,7 @@ class SMB:
         self.__kdc      = kdcHost
         self.__TGT      = TGT
         self.__TGS      = TGS
+        self._doKerberos= True
 
         # First of all, we need to get a TGT for the user
         userName = Principal(user, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
@@ -3185,7 +3211,7 @@ class SMB:
 
         # NTLMSSP
         blob['MechTypes'] = [TypesMech['NTLMSSP - Microsoft NTLM Security Support Provider']]
-        auth = ntlm.getNTLMSSPType1('','',self._SignatureRequired, use_ntlmv2 = use_ntlmv2)
+        auth = ntlm.getNTLMSSPType1(self.get_client_name(),domain,self._SignatureRequired, use_ntlmv2 = use_ntlmv2)
         blob['MechToken'] = str(auth)
 
         sessionSetup['Parameters']['SecurityBlobLength']  = len(blob)

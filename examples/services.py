@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -28,53 +28,36 @@ from impacket.crypto import *
 
 
 class SVCCTL:
-    KNOWN_PROTOCOLS = {
-        '139/SMB': (r'ncacn_np:%s[\pipe\svcctl]', 139),
-        '445/SMB': (r'ncacn_np:%s[\pipe\svcctl]', 445),
-        }
 
-    def __init__(self, username, password, domain, options):
+    def __init__(self, username, password, domain, options, port=445):
         self.__username = username
         self.__password = password
-        self.__protocol = SVCCTL.KNOWN_PROTOCOLS.keys()
         self.__options = options
+        self.__port = port
         self.__action = options.action.upper()
         self.__domain = domain
         self.__lmhash = ''
         self.__nthash = ''
         self.__aesKey = options.aesKey
         self.__doKerberos = options.k
+        self.__kdcHost = options.dc_ip
 
         if options.hashes is not None:
             self.__lmhash, self.__nthash = options.hashes.split(':')
 
-    def run(self, addr):
+    def run(self, remoteName, remoteHost):
 
-        # Try all requested protocols until one works.
-        for protocol in self.__protocol:
-            protodef = SVCCTL.KNOWN_PROTOCOLS[protocol]
-            port = protodef[1]
+        stringbinding = 'ncacn_np:%s[\pipe\svcctl]' % remoteName
+        logging.debug('StringBinding %s'%stringbinding)
+        rpctransport = transport.DCERPCTransportFactory(stringbinding)
+        rpctransport.set_dport(self.__port)
+        rpctransport.setRemoteHost(remoteHost)
+        if hasattr(rpctransport, 'set_credentials'):
+            # This method exists only for selected protocol sequences.
+            rpctransport.set_credentials(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash, self.__aesKey)
 
-            logging.info("Trying protocol %s..." % protocol)
-            stringbinding = protodef[0] % addr
-
-            rpctransport = transport.DCERPCTransportFactory(stringbinding)
-            rpctransport.set_dport(port)
-            rpctransport.set_kerberos(self.__doKerberos)
-            if hasattr(rpctransport, 'set_credentials'):
-                # This method exists only for selected protocol sequences.
-                rpctransport.set_credentials(self.__username,self.__password, self.__domain, self.__lmhash, self.__nthash, self.__aesKey)
-
-            try:
-                self.doStuff(rpctransport)
-            except Exception, e:
-                #import traceback
-                #traceback.print_exc()
-                logging.critical(str(e))
-                break
-            else:
-                # Got a response. No need for further iterations.
-                break
+        rpctransport.set_kerberos(self.__doKerberos, self.__kdcHost)
+        self.doStuff(rpctransport)
 
     def doStuff(self, rpctransport):
         dce = rpctransport.get_dce_rpc()
@@ -199,7 +182,8 @@ class SVCCTL:
             print "Total Services: %d" % len(resp)
         elif self.__action == 'CREATE':
             logging.info("Creating service %s" % self.__options.name)
-            scmr.hRCreateServiceW(rpc, scManagerHandle,self.__options.name + '\x00', self.__options.display + '\x00', lpBinaryPathName=self.__options.path + '\x00')
+            scmr.hRCreateServiceW(rpc, scManagerHandle, self.__options.name + '\x00', self.__options.display + '\x00',
+                                  lpBinaryPathName=self.__options.path + '\x00')
         elif self.__action == 'CHANGE':
             logging.info("Changing service config for %s" % self.__options.name)
             if self.__options.start_type is not None:
@@ -240,7 +224,8 @@ class SVCCTL:
  
 
             #resp = scmr.hRChangeServiceConfigW(rpc, serviceHandle,  display, path, service_type, start_type, start_name, password)
-            scmr.hRChangeServiceConfigW(rpc, serviceHandle, service_type, start_type, scmr.SERVICE_ERROR_IGNORE, path, NULL, NULL, NULL, 0, start_name, password, 0, display)
+            scmr.hRChangeServiceConfigW(rpc, serviceHandle, service_type, start_type, scmr.SERVICE_ERROR_IGNORE, path,
+                                        NULL, NULL, NULL, 0, start_name, password, 0, display)
             scmr.hRCloseServiceHandle(rpc, serviceHandle)
         else:
             logging.error("Unknown action %s" % self.__action)
@@ -305,15 +290,30 @@ if __name__ == '__main__':
     create_parser.add_argument('-path', action='store', required=False, help='binary path')
     create_parser.add_argument('-service_type', action='store', required=False, help='service type')
     create_parser.add_argument('-start_type', action='store', required=False, help='service start type')
-    create_parser.add_argument('-start_name', action='store', required=False, help='string that specifies the name of the account under which the service should run')
-    create_parser.add_argument('-password', action='store', required=False, help='string that contains the password of the account whose name was specified by the start_name parameter')
+    create_parser.add_argument('-start_name', action='store', required=False, help='string that specifies the name of '
+                               'the account under which the service should run')
+    create_parser.add_argument('-password', action='store', required=False, help='string that contains the password of '
+                               'the account whose name was specified by the start_name parameter')
 
     group = parser.add_argument_group('authentication')
 
     group.add_argument('-hashes', action="store", metavar = "LMHASH:NTHASH", help='NTLM hashes, format is LMHASH:NTHASH')
     group.add_argument('-no-pass', action="store_true", help='don\'t ask for password (useful for -k)')
-    group.add_argument('-k', action="store_true", help='Use Kerberos authentication. Grabs credentials from ccache file (KRB5CCNAME) based on target parameters. If valid credentials cannot be found, it will use the ones specified in the command line')
-    group.add_argument('-aesKey', action="store", metavar = "hex key", help='AES key to use for Kerberos Authentication (128 or 256 bits)')
+    group.add_argument('-k', action="store_true", help='Use Kerberos authentication. Grabs credentials from ccache file '
+                       '(KRB5CCNAME) based on target parameters. If valid credentials cannot be found, it will use the '
+                       'ones specified in the command line')
+    group.add_argument('-aesKey', action="store", metavar = "hex key", help='AES key to use for Kerberos Authentication '
+                                                                            '(128 or 256 bits)')
+
+    group = parser.add_argument_group('connection')
+
+    group.add_argument('-dc-ip', action='store',metavar = "ip address", help='IP Address of the domain controller. If '
+                       'ommited it use the domain part (FQDN) specified in the target parameter')
+    group.add_argument('-target-ip', action='store', metavar="ip address", help='IP Address of the target machine. If '
+                       'ommited it will use whatever was specified as target. This is useful when target is the NetBIOS '
+                       'name and you cannot resolve it')
+    group.add_argument('-port', choices=['139', '445'], nargs='?', default='445', metavar="destination port",
+                       help='Destination port to connect to SMB Server')
  
     if len(sys.argv)==1:
         parser.print_help()
@@ -327,15 +327,20 @@ if __name__ == '__main__':
         logging.getLogger().setLevel(logging.INFO)
 
     import re
-    domain, username, password, address = re.compile('(?:(?:([^/@:]*)/)?([^@:]*)(?::([^@]*))?@)?(.*)').match(options.target).groups('')
+
+    domain, username, password, remoteName = re.compile('(?:(?:([^/@:]*)/)?([^@:]*)(?::([^@]*))?@)?(.*)').match(
+        options.target).groups('')
 
     #In case the password contains '@'
-    if '@' in address:
-        password = password + '@' + address.rpartition('@')[0]
-        address = address.rpartition('@')[2]
+    if '@' in remoteName:
+        password = password + '@' + remoteName.rpartition('@')[0]
+        remoteName = remoteName.rpartition('@')[2]
 
     if domain is None:
         domain = ''
+
+    if options.target_ip is None:
+        options.target_ip = remoteName
 
     if options.aesKey is not None:
         options.k = True
@@ -344,8 +349,8 @@ if __name__ == '__main__':
         from getpass import getpass
         password = getpass("Password:")
 
-    services = SVCCTL(username, password, domain, options)
+    services = SVCCTL(username, password, domain, options, int(options.port))
     try:
-        services.run(address)
+        services.run(remoteName, options.target_ip)
     except Exception, e:
         logging.error(str(e))

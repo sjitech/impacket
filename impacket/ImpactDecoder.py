@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2013 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -22,9 +22,9 @@ import ICMP6
 import IP6_Extension_Headers
 from cdp import CDP
 from Dot11Crypto import RC4
-import eap
-from impacket import wps
+from impacket import wps, eap
 from impacket.dot11 import Dot11WEPData
+from impacket import LOG
 
 
 """Classes to convert from raw packets into a hierarchy of
@@ -81,6 +81,9 @@ class EthDecoder(Decoder):
         elif e.get_ether_type() == ImpactPacket.ARP.ethertype:
             self.arp_decoder = ARPDecoder()
             packet = self.arp_decoder.decode(aBuffer[off:])
+        elif e.get_ether_type() == eap.DOT1X_AUTHENTICATION:
+            self.eapol_decoder = EAPOLDecoder()
+            packet = self.eapol_decoder.decode(aBuffer[off:])
         # LLC ?
         elif e.get_ether_type() < 1500:
             self.llc_decoder = LLCDecoder()
@@ -108,6 +111,9 @@ class LinuxSLLDecoder(Decoder):
         elif e.get_ether_type() == ImpactPacket.ARP.ethertype:
             self.arp_decoder = ARPDecoder()
             packet = self.arp_decoder.decode(aBuffer[off:])
+        elif e.get_ether_type() == eap.DOT1X_AUTHENTICATION:
+            self.eapol_decoder = EAPOLDecoder()
+            packet = self.eapol_decoder.decode(aBuffer[off:])
         else:
             self.data_decoder = DataDecoder()
             packet = self.data_decoder.decode(aBuffer[off:])
@@ -124,6 +130,12 @@ class IPDecoder(Decoder):
         self.set_decoded_protocol ( i )
         off = i.get_header_size()
         end = i.get_ip_len()
+        # If ip_len == 0 we might be facing TCP segmentation offload, let's calculate the right len
+        if end == 0:
+            LOG.warning('IP len reported as 0, most probably because of TCP segmentation offload. Attempting to fix its size')
+            i.set_ip_len(len(aBuffer))
+            end = i.get_ip_len()
+
         if i.get_ip_p() == ImpactPacket.UDP.protocol:
             self.udp_decoder = UDPDecoder()
             packet = self.udp_decoder.decode(aBuffer[off:end])
@@ -133,6 +145,9 @@ class IPDecoder(Decoder):
         elif i.get_ip_p() == ImpactPacket.ICMP.protocol:
             self.icmp_decoder = ICMPDecoder()
             packet = self.icmp_decoder.decode(aBuffer[off:end])
+        elif i.get_ip_p() == ImpactPacket.IGMP.protocol:
+            self.igmp_decoder = IGMPDecoder()
+            packet = self.igmp_decoder.decode(aBuffer[off:end])
         else:
             self.data_decoder = DataDecoder()
             packet = self.data_decoder.decode(aBuffer[off:end])
@@ -284,6 +299,18 @@ class TCPDecoder(Decoder):
         packet = self.data_decoder.decode(aBuffer[off:])
         t.contains(packet)
         return t
+
+class IGMPDecoder(Decoder):
+    def __init__(self):
+        pass
+    def decode(self, aBuffer):
+        ig = ImpactPacket.IGMP(aBuffer)
+        off = ig.get_header_size()
+        self.data_decoder = DataDecoder()
+        packet = self.data_decoder.decode(aBuffer[off:])
+        ig.contains(packet)
+        return ig
+
 
 class IPDecoderForICMP(Decoder):
     """This class was added to parse the IP header of ICMP unreachables packets

@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -146,6 +146,8 @@ class ServiceInstall:
                 # Let's get the shares
                 shares = self.getShares()
                 self.share = self.findWritableShare(shares)
+                if self.share is None:
+                    return False
                 self.copy_file(self.__exeFile ,self.share,self.__binary_service_name)
                 fileCopied = True
                 svcManager = self.openSvcManager()

@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2015 CORE Security Technologies)
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -73,8 +73,17 @@ def outputToJohnFormat(challenge, username, domain, lmresponse, ntresponse):
             # NTLMv1
             ret_value = {'hash_string':'%s::%s:%s:%s:%s' % (username.decode('utf-16le'), domain.decode('utf-16le'), hexlify(lmresponse), hexlify(ntresponse), hexlify(challenge)), 'hash_version':'ntlm'}
     except:
-        #TODO: log some information about the error
-        pass
+        # Let's try w/o decoding Unicode
+        try:
+            if len(ntresponse) > 24:
+                # Extended Security - NTLMv2
+                ret_value = {'hash_string':'%s::%s:%s:%s:%s' % (username, domain, hexlify(challenge), hexlify(ntresponse)[:32], hexlify(ntresponse)[32:]), 'hash_version':'ntlmv2'}
+            else:
+                # NTLMv1
+                ret_value = {'hash_string':'%s::%s:%s:%s:%s' % (username, domain, hexlify(lmresponse), hexlify(ntresponse), hexlify(challenge)), 'hash_version':'ntlm'}
+        except Exception, e:
+            LOG.error("outputToJohnFormat: %s" % e)
+            pass
 
     return ret_value
 
@@ -144,7 +153,7 @@ def searchShare(connId, share, smbServer):
 def openFile(path,fileName, accessMode, fileAttributes, openMode):
     fileName = os.path.normpath(fileName.replace('\\','/'))
     errorCode = 0
-    if len(fileName) > 0 and fileName[0] == '/':
+    if len(fileName) > 0 and (fileName[0] == '/' or fileName[0] == '\\'):
        # strip leading '/'
        fileName = fileName[1:]
     pathName = os.path.join(path,fileName)
@@ -192,7 +201,7 @@ def queryFsInformation(path, filename, level=0):
          flags    = 0
 
     fileName = os.path.normpath(filename.replace('\\','/'))
-    if len(fileName) > 0 and fileName[0] == '/':
+    if len(fileName) > 0 and (fileName[0] == '/' or fileName[0] == '\\'):
        # strip leading '/'
        fileName = fileName[1:]
     pathName = os.path.join(path,fileName)
@@ -246,7 +255,7 @@ def findFirst2(path, fileName, level, searchAttributes, isSMB2 = False):
          encoding = 'ascii'
          flags    = 0
 
-     if len(fileName) > 0 and fileName[0] == '/':
+     if len(fileName) > 0 and (fileName[0] == '/' or fileName[0] == '\\'):
         # strip leading '/'
         fileName = fileName[1:]
 
@@ -368,7 +377,7 @@ def queryPathInformation(path, filename, level):
   try:
     errorCode = 0
     fileName = os.path.normpath(filename.replace('\\','/'))
-    if len(fileName) > 0 and fileName[0] == '/' and path != '':
+    if len(fileName) > 0 and (fileName[0] == '/' or fileName[0] == '\\') and path != '':
        # strip leading '/'
        fileName = fileName[1:]
     pathName = os.path.join(path,fileName)
@@ -562,7 +571,7 @@ class TRANS2Commands:
             path     = connData['ConnectedShares'][recvPacket['Tid']]['path']
             fileName = decodeSMBString(recvPacket['Flags2'], setPathInfoParameters['FileName'])
             fileName = os.path.normpath(fileName.replace('\\','/'))
-            if len(fileName) > 0 and fileName[0] == '/' and path != '':
+            if len(fileName) > 0 and (fileName[0] == '/' or fileName[0] == '\\') and path != '':
                # strip leading '/'
                fileName = fileName[1:]
             pathName = os.path.join(path,fileName)
@@ -1397,7 +1406,7 @@ class SMBCommands:
              path = connData['ConnectedShares'][recvPacket['Tid']]['path']
              fileName = os.path.normpath(decodeSMBString(recvPacket['Flags2'],comCreateDirectoryData['DirectoryName']).replace('\\','/'))
              if len(fileName) > 0:
-                if fileName[0] == '/':
+                if fileName[0] == '/' or fileName[0] == '\\':
                     # strip leading '/'
                     fileName = fileName[1:]
              pathName = os.path.join(path,fileName)
@@ -1441,11 +1450,11 @@ class SMBCommands:
              path = connData['ConnectedShares'][recvPacket['Tid']]['path']
              oldFileName = os.path.normpath(decodeSMBString(recvPacket['Flags2'],comRenameData['OldFileName']).replace('\\','/'))
              newFileName = os.path.normpath(decodeSMBString(recvPacket['Flags2'],comRenameData['NewFileName']).replace('\\','/'))
-             if len(oldFileName) > 0 and oldFileName[0] == '/':
+             if len(oldFileName) > 0 and (oldFileName[0] == '/' or oldFileName[0] == '\\'):
                 # strip leading '/'
                 oldFileName = oldFileName[1:]
              oldPathName = os.path.join(path,oldFileName)
-             if len(newFileName) > 0 and newFileName[0] == '/':
+             if len(newFileName) > 0 and (newFileName[0] == '/' or newFileName[0] == '\\'):
                 # strip leading '/'
                 newFileName = newFileName[1:]
              newPathName = os.path.join(path,newFileName)
@@ -1490,7 +1499,7 @@ class SMBCommands:
              errorCode = STATUS_SUCCESS
              path = connData['ConnectedShares'][recvPacket['Tid']]['path']
              fileName = os.path.normpath(decodeSMBString(recvPacket['Flags2'],comDeleteData['FileName']).replace('\\','/'))
-             if len(fileName) > 0 and fileName[0] == '/':
+             if len(fileName) > 0 and (fileName[0] == '/' or fileName[0] == '\\'):
                 # strip leading '/'
                 fileName = fileName[1:]
              pathName = os.path.join(path,fileName)
@@ -1534,7 +1543,7 @@ class SMBCommands:
              errorCode = STATUS_SUCCESS
              path = connData['ConnectedShares'][recvPacket['Tid']]['path']
              fileName = os.path.normpath(decodeSMBString(recvPacket['Flags2'],comDeleteDirectoryData['DirectoryName']).replace('\\','/'))
-             if len(fileName) > 0 and fileName[0] == '/':
+             if len(fileName) > 0 and (fileName[0] == '/' or fileName[0] == '\\'):
                 # strip leading '/'
                 fileName = fileName[1:]
              pathName = os.path.join(path,fileName)
@@ -1912,7 +1921,7 @@ class SMBCommands:
              deleteOnClose = False
 
              fileName = os.path.normpath(decodeSMBString(recvPacket['Flags2'],ntCreateAndXData['FileName']).replace('\\','/'))
-             if len(fileName) > 0 and fileName[0] == '/':
+             if len(fileName) > 0 and (fileName[0] == '/' or fileName[0] == '\\'):
                 # strip leading '/'
                 fileName = fileName[1:]
              pathName = os.path.join(path,fileName)
@@ -2257,20 +2266,20 @@ class SMBCommands:
 
                 ansFlags = 0
 
-                if negotiateMessage['flags'] & ntlm.NTLMSSP_KEY_56:
-                   ansFlags |= ntlm.NTLMSSP_KEY_56
-                if negotiateMessage['flags'] & ntlm.NTLMSSP_KEY_128:
-                   ansFlags |= ntlm.NTLMSSP_KEY_128
-                if negotiateMessage['flags'] & ntlm.NTLMSSP_KEY_EXCHANGE:
-                   ansFlags |= ntlm.NTLMSSP_KEY_EXCHANGE
-                if negotiateMessage['flags'] & ntlm.NTLMSSP_NTLM2_KEY:
-                   ansFlags |= ntlm.NTLMSSP_NTLM2_KEY
-                if negotiateMessage['flags'] & ntlm.NTLMSSP_UNICODE:
-                   ansFlags |= ntlm.NTLMSSP_UNICODE
-                if negotiateMessage['flags'] & ntlm.NTLMSSP_OEM:
-                   ansFlags |= ntlm.NTLMSSP_OEM
+                if negotiateMessage['flags'] & ntlm.NTLMSSP_NEGOTIATE_56:
+                   ansFlags |= ntlm.NTLMSSP_NEGOTIATE_56
+                if negotiateMessage['flags'] & ntlm.NTLMSSP_NEGOTIATE_128:
+                   ansFlags |= ntlm.NTLMSSP_NEGOTIATE_128
+                if negotiateMessage['flags'] & ntlm.NTLMSSP_NEGOTIATE_KEY_EXCH:
+                   ansFlags |= ntlm.NTLMSSP_NEGOTIATE_KEY_EXCH
+                if negotiateMessage['flags'] & ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY:
+                   ansFlags |= ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY
+                if negotiateMessage['flags'] & ntlm.NTLMSSP_NEGOTIATE_UNICODE:
+                   ansFlags |= ntlm.NTLMSSP_NEGOTIATE_UNICODE
+                if negotiateMessage['flags'] & ntlm.NTLM_NEGOTIATE_OEM:
+                   ansFlags |= ntlm.NTLM_NEGOTIATE_OEM
 
-                ansFlags |= ntlm.NTLMSSP_VERSION | ntlm.NTLMSSP_TARGET_INFO | ntlm.NTLMSSP_TARGET_TYPE_SERVER | ntlm.NTLMSSP_NTLM_KEY | ntlm.NTLMSSP_TARGET
+                ansFlags |= ntlm.NTLMSSP_NEGOTIATE_VERSION | ntlm.NTLMSSP_NEGOTIATE_TARGET_INFO | ntlm.NTLMSSP_TARGET_TYPE_SERVER | ntlm.NTLMSSP_NEGOTIATE_NTLM | ntlm.NTLMSSP_REQUEST_TARGET
 
                 # Generate the AV_PAIRS
                 av_pairs = ntlm.AV_PAIRS()
@@ -2600,20 +2609,20 @@ class SMB2Commands:
 
             ansFlags = 0
 
-            if negotiateMessage['flags'] & ntlm.NTLMSSP_KEY_56:
-               ansFlags |= ntlm.NTLMSSP_KEY_56
-            if negotiateMessage['flags'] & ntlm.NTLMSSP_KEY_128:
-               ansFlags |= ntlm.NTLMSSP_KEY_128
-            if negotiateMessage['flags'] & ntlm.NTLMSSP_KEY_EXCHANGE:
-               ansFlags |= ntlm.NTLMSSP_KEY_EXCHANGE
-            if negotiateMessage['flags'] & ntlm.NTLMSSP_NTLM2_KEY:
-               ansFlags |= ntlm.NTLMSSP_NTLM2_KEY
-            if negotiateMessage['flags'] & ntlm.NTLMSSP_UNICODE:
-               ansFlags |= ntlm.NTLMSSP_UNICODE
-            if negotiateMessage['flags'] & ntlm.NTLMSSP_OEM:
-               ansFlags |= ntlm.NTLMSSP_OEM
+            if negotiateMessage['flags'] & ntlm.NTLMSSP_NEGOTIATE_56:
+               ansFlags |= ntlm.NTLMSSP_NEGOTIATE_56
+            if negotiateMessage['flags'] & ntlm.NTLMSSP_NEGOTIATE_128:
+               ansFlags |= ntlm.NTLMSSP_NEGOTIATE_128
+            if negotiateMessage['flags'] & ntlm.NTLMSSP_NEGOTIATE_KEY_EXCH:
+               ansFlags |= ntlm.NTLMSSP_NEGOTIATE_KEY_EXCH
+            if negotiateMessage['flags'] & ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY:
+               ansFlags |= ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY
+            if negotiateMessage['flags'] & ntlm.NTLMSSP_NEGOTIATE_UNICODE:
+               ansFlags |= ntlm.NTLMSSP_NEGOTIATE_UNICODE
+            if negotiateMessage['flags'] & ntlm.NTLM_NEGOTIATE_OEM:
+               ansFlags |= ntlm.NTLM_NEGOTIATE_OEM
 
-            ansFlags |= ntlm.NTLMSSP_VERSION | ntlm.NTLMSSP_TARGET_INFO | ntlm.NTLMSSP_TARGET_TYPE_SERVER | ntlm.NTLMSSP_NTLM_KEY | ntlm.NTLMSSP_TARGET
+            ansFlags |= ntlm.NTLMSSP_NEGOTIATE_VERSION | ntlm.NTLMSSP_NEGOTIATE_TARGET_INFO | ntlm.NTLMSSP_TARGET_TYPE_SERVER | ntlm.NTLMSSP_NEGOTIATE_NTLM | ntlm.NTLMSSP_REQUEST_TARGET
 
             # Generate the AV_PAIRS
             av_pairs = ntlm.AV_PAIRS()
@@ -2785,7 +2794,7 @@ class SMB2Commands:
              deleteOnClose = False
 
              fileName = os.path.normpath(ntCreateRequest['Buffer'][:ntCreateRequest['NameLength']].decode('utf-16le').replace('\\','/'))
-             if len(fileName) > 0 and fileName[0] == '/':
+             if len(fileName) > 0 and (fileName[0] == '/' or fileName[0] == '\\'):
                 # strip leading '/'
                 fileName = fileName[1:]
              pathName = os.path.join(path,fileName)
@@ -3268,7 +3277,9 @@ class SMB2Commands:
         # If any other information class is specified in the FileInformationClass 
         # field of the SMB2 QUERY_DIRECTORY Request, the server MUST fail the 
         # operation with STATUS_INVALID_INFO_CLASS. 
-        if queryDirectoryRequest['FileInformationClass'] not in (smb2.FILE_DIRECTORY_INFORMATION,smb2.FILE_FULL_DIRECTORY_INFORMATION,smb2.FILEID_FULL_DIRECTORY_INFORMATION, smb2.FILE_BOTH_DIRECTORY_INFORMATION, smb2.FILEID_BOTH_DIRECTORY_INFORMATION, smb2.FILENAMES_INFORMATION):
+        if queryDirectoryRequest['FileInformationClass'] not in (
+        smb2.FILE_DIRECTORY_INFORMATION, smb2.FILE_FULL_DIRECTORY_INFORMATION, smb2.FILEID_FULL_DIRECTORY_INFORMATION,
+        smb2.FILE_BOTH_DIRECTORY_INFORMATION, smb2.FILEID_BOTH_DIRECTORY_INFORMATION, smb2.FILENAMES_INFORMATION):
             return [smb2.SMB2Error()], None, STATUS_INVALID_INFO_CLASS
 
         # If SMB2_REOPEN is set in the Flags field of the SMB2 QUERY_DIRECTORY 
@@ -3328,6 +3339,9 @@ class SMB2Commands:
         respData = ''
         for nItem in range(connData['OpenedFiles'][fileID]['Open']['EnumerationLocation'], searchCount):
             connData['OpenedFiles'][fileID]['Open']['EnumerationLocation'] += 1
+            if queryDirectoryRequest['Flags'] & smb2.SL_RETURN_SINGLE_ENTRY:
+                # If single entry is requested we must clear the NextEntryOffset
+                searchResult[nItem]['NextEntryOffset'] = 0
             data = searchResult[nItem].getData()
             lenData = len(data)
             padLen = (8-(lenData % 8)) %8
@@ -3732,6 +3746,12 @@ smb.SMB.TRANS_TRANSACT_NMPIPE          :self.__smbTransHandler.transactNamedPipe
     def registerNamedPipe(self, pipeName, address):
         self.__registeredNamedPipes[unicode(pipeName)] = address
         return True
+
+    def unregisterNamedPipe(self, pipeName):
+        if self.__registeredNamedPipes.has_key(pipeName):
+            del(self.__registeredNamedPipes[unicode(pipeName)])
+            return True
+        return False
 
     def unregisterTransaction(self, transCommand):
         if self.__smbTransCommands.has_key(transCommand):
@@ -4342,6 +4362,15 @@ class SimpleSMBServer:
         self.__srvsServer.start()
         self.__wkstServer.start()
         self.__server.serve_forever()
+
+    def registerNamedPipe(self, pipeName, address):
+        return self.__server.registerNamedPipe(pipeName, address)
+
+    def unregisterNamedPipe(self, pipeName):
+        return self.__server.unregisterNamedPipe(pipeName)
+
+    def getRegisteredNamedPipes(self):
+        return self.__server.getRegisteredNamedPipes()
 
     def addShare(self, shareName, sharePath, shareComment='', shareType = 0, readOnly = 'no'):
         self.__smbConfig.add_section(shareName)

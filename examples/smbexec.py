@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -105,77 +105,64 @@ class SMBServer(Thread):
         self._Thread__stop()
 
 class CMDEXEC:
-    KNOWN_PROTOCOLS = {
-        '139/SMB': (r'ncacn_np:%s[\pipe\svcctl]', 139),
-        '445/SMB': (r'ncacn_np:%s[\pipe\svcctl]', 445),
-        }
-
-
-    def __init__(self, protocols = None, 
-                 username = '', password = '', domain = '', hashes = None, aesKey = None, doKerberos = None, mode = None, share = None):
-        if not protocols:
-            protocols = CMDEXEC.KNOWN_PROTOCOLS.keys()
+    def __init__(self, username='', password='', domain='', hashes=None, aesKey=None,
+                 doKerberos=None, kdcHost=None, mode=None, share=None, port=445):
 
         self.__username = username
         self.__password = password
-        self.__protocols = [protocols]
+        self.__port = port
         self.__serviceName = 'BTOBTO'
         self.__domain = domain
         self.__lmhash = ''
         self.__nthash = ''
         self.__aesKey = aesKey
         self.__doKerberos = doKerberos
+        self.__kdcHost = kdcHost
         self.__share = share
         self.__mode  = mode
         self.shell = None
         if hashes is not None:
             self.__lmhash, self.__nthash = hashes.split(':')
 
-    def run(self, addr):
-        for protocol in self.__protocols:
-            protodef = CMDEXEC.KNOWN_PROTOCOLS[protocol]
-            port = protodef[1]
+    def run(self, remoteName, remoteHost):
+        stringbinding = 'ncacn_np:%s[\pipe\svcctl]' % remoteName
+        logging.debug('StringBinding %s'%stringbinding)
+        rpctransport = transport.DCERPCTransportFactory(stringbinding)
+        rpctransport.set_dport(self.__port)
+        rpctransport.setRemoteHost(remoteHost)
+        if hasattr(rpctransport,'preferred_dialect'):
+            rpctransport.preferred_dialect(SMB_DIALECT)
+        if hasattr(rpctransport, 'set_credentials'):
+            # This method exists only for selected protocol sequences.
+            rpctransport.set_credentials(self.__username, self.__password, self.__domain, self.__lmhash,
+                                         self.__nthash, self.__aesKey)
+        rpctransport.set_kerberos(self.__doKerberos, self.__kdcHost)
 
-            logging.info("Trying protocol %s..." % protocol)
-            logging.info("Creating service %s..." % self.__serviceName)
-
-            stringbinding = protodef[0] % addr
-
-            rpctransport = transport.DCERPCTransportFactory(stringbinding)
-            rpctransport.set_dport(port)
-
-            if hasattr(rpctransport,'preferred_dialect'):
-               rpctransport.preferred_dialect(SMB_DIALECT)
-            if hasattr(rpctransport, 'set_credentials'):
-                # This method exists only for selected protocol sequences.
-                rpctransport.set_credentials(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash, self.__aesKey)
-            rpctransport.set_kerberos(self.__doKerberos)
-
-            self.shell = None
-            try:
-                if self.__mode == 'SERVER':
-                    serverThread = SMBServer()
-                    serverThread.daemon = True
-                    serverThread.start()
-                self.shell = RemoteShell(self.__share, rpctransport, self.__mode, self.__serviceName)
-                self.shell.cmdloop()
-                if self.__mode == 'SERVER':
-                    serverThread.stop()
-            except  (Exception, KeyboardInterrupt), e:
-                #import traceback
-                #traceback.print_exc()
-                logging.critical(str(e))
-                if self.shell is not None:
-                    self.shell.finish()
-                sys.stdout.flush()
-                sys.exit(1)
+        self.shell = None
+        try:
+            if self.__mode == 'SERVER':
+                serverThread = SMBServer()
+                serverThread.daemon = True
+                serverThread.start()
+            self.shell = RemoteShell(self.__share, rpctransport, self.__mode, self.__serviceName)
+            self.shell.cmdloop()
+            if self.__mode == 'SERVER':
+                serverThread.stop()
+        except  (Exception, KeyboardInterrupt), e:
+            #import traceback
+            #traceback.print_exc()
+            logging.critical(str(e))
+            if self.shell is not None:
+                self.shell.finish()
+            sys.stdout.flush()
+            sys.exit(1)
 
 class RemoteShell(cmd.Cmd):
     def __init__(self, share, rpc, mode, serviceName):
         cmd.Cmd.__init__(self)
         self.__share = share
         self.__mode = mode
-        self.__output = '\\Windows\\Temp\\' + OUTPUT_FILENAME 
+        self.__output = '\\\\127.0.0.1\\' + self.__share + '\\' + OUTPUT_FILENAME
         self.__batchFile = '%TEMP%\\' + BATCH_FILENAME 
         self.__outputBuffer = ''
         self.__command = ''
@@ -253,8 +240,8 @@ class RemoteShell(cmd.Cmd):
             self.__outputBuffer += data
 
         if self.__mode == 'SHARE':
-            self.transferClient.getFile(self.__share, self.__output, output_callback)
-            self.transferClient.deleteFile(self.__share, self.__output)
+            self.transferClient.getFile(self.__share, OUTPUT_FILENAME, output_callback)
+            self.transferClient.deleteFile(self.__share, OUTPUT_FILENAME)
         else:
             fd = open(SMBSERVER_DIR + '/' + OUTPUT_FILENAME,'r')
             output_callback(fd.read())
@@ -262,11 +249,13 @@ class RemoteShell(cmd.Cmd):
             os.unlink(SMBSERVER_DIR + '/' + OUTPUT_FILENAME)
 
     def execute_remote(self, data):
-        command = self.__shell + 'echo ' + data + ' ^> ' + self.__output + ' 2^>^&1 > ' + self.__batchFile + ' & ' + self.__shell + self.__batchFile 
+        command = self.__shell + 'echo ' + data + ' ^> ' + self.__output + ' 2^>^&1 > ' + self.__batchFile + ' & ' + \
+                  self.__shell + self.__batchFile
         if self.__mode == 'SERVER':
             command += ' & ' + self.__copyBack
         command += ' & ' + 'del ' + self.__batchFile 
 
+        logging.debug('Executing %s' % command)
         resp = scmr.hRCreateServiceW(self.__scmr, self.__scHandle, self.__serviceName, self.__serviceName, lpBinaryPathName=command)
         service = resp['lpServiceHandle']
 
@@ -293,18 +282,31 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     parser.add_argument('target', action='store', help='[[domain/]username[:password]@]<targetName or address>')
-    parser.add_argument('-share', action='store', default = 'C$', help='share where the output will be grabbed from (default C$)')
-    parser.add_argument('-mode', action='store', choices = {'SERVER','SHARE'}, default='SHARE', help='mode to use (default SHARE, SERVER needs root!)')
+    parser.add_argument('-share', action='store', default = 'C$', help='share where the output will be grabbed from '
+                                                                       '(default C$)')
+    parser.add_argument('-mode', action='store', choices = {'SERVER','SHARE'}, default='SHARE',
+                        help='mode to use (default SHARE, SERVER needs root!)')
     parser.add_argument('-debug', action='store_true', help='Turn DEBUG output ON')
 
-    parser.add_argument('protocol', choices=CMDEXEC.KNOWN_PROTOCOLS.keys(), nargs='?', default='445/SMB', help='transport protocol (default 445/SMB)')
+    group = parser.add_argument_group('connection')
+
+    group.add_argument('-dc-ip', action='store',metavar = "ip address", help='IP Address of the domain controller. '
+                       'If ommited it use the domain part (FQDN) specified in the target parameter')
+    group.add_argument('-target-ip', action='store', metavar="ip address", help='IP Address of the target machine. If '
+                       'ommited it will use whatever was specified as target. This is useful when target is the NetBIOS '
+                       'name and you cannot resolve it')
+    group.add_argument('-port', choices=['139', '445'], nargs='?', default='445', metavar="destination port",
+                       help='Destination port to connect to SMB Server')
 
     group = parser.add_argument_group('authentication')
 
     group.add_argument('-hashes', action="store", metavar = "LMHASH:NTHASH", help='NTLM hashes, format is LMHASH:NTHASH')
     group.add_argument('-no-pass', action="store_true", help='don\'t ask for password (useful for -k)')
-    group.add_argument('-k', action="store_true", help='Use Kerberos authentication. Grabs credentials from ccache file (KRB5CCNAME) based on target parameters. If valid credentials cannot be found, it will use the ones specified in the command line')
-    group.add_argument('-aesKey', action="store", metavar = "hex key", help='AES key to use for Kerberos Authentication (128 or 256 bits)')
+    group.add_argument('-k', action="store_true", help='Use Kerberos authentication. Grabs credentials from ccache file '
+                       '(KRB5CCNAME) based on target parameters. If valid credentials cannot be found, it will use the '
+                       'ones specified in the command line')
+    group.add_argument('-aesKey', action="store", metavar = "hex key", help='AES key to use for Kerberos Authentication '
+                                                                            '(128 or 256 bits)')
 
  
     if len(sys.argv)==1:
@@ -319,12 +321,12 @@ if __name__ == '__main__':
         logging.getLogger().setLevel(logging.INFO)
 
     import re
-    domain, username, password, address = re.compile('(?:(?:([^/@:]*)/)?([^@:]*)(?::([^@]*))?@)?(.*)').match(options.target).groups('')
+    domain, username, password, remoteName = re.compile('(?:(?:([^/@:]*)/)?([^@:]*)(?::([^@]*))?@)?(.*)').match(options.target).groups('')
 
     #In case the password contains '@'
-    if '@' in address:
-        password = password + '@' + address.rpartition('@')[0]
-        address = address.rpartition('@')[2]
+    if '@' in remoteName:
+        password = password + '@' + remoteName.rpartition('@')[0]
+        remoteName = remoteName.rpartition('@')[2]
 
     if domain is None:
         domain = ''
@@ -333,12 +335,16 @@ if __name__ == '__main__':
         from getpass import getpass
         password = getpass("Password:")
 
+    if options.target_ip is None:
+        options.target_ip = remoteName
+
     if options.aesKey is not None:
         options.k = True
 
     try:
-        executer = CMDEXEC(options.protocol, username, password, domain, options.hashes, options.aesKey, options.k, options.mode, options.share)
-        executer.run(address)
+        executer = CMDEXEC(username, password, domain, options.hashes, options.aesKey, options.k,
+                           options.dc_ip, options.mode, options.share, int(options.port))
+        executer.run(remoteName, options.target_ip)
     except Exception, e:
         logging.critical(str(e))
     sys.exit(0)

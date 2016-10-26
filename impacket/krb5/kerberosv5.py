@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -44,8 +44,13 @@ def sendReceive(data, host, kdcHost):
     messageLen = struct.pack('!i', len(data))
 
     LOG.debug('Trying to connect to KDC at %s' % targetHost)
-    s = socket.socket()
-    s.connect((targetHost, 88))
+    try:
+        af, socktype, proto, canonname, sa = socket.getaddrinfo(targetHost, 88, 0, socket.SOCK_STREAM)[0]
+        s = socket.socket(af, socktype, proto)
+        s.connect(sa)
+    except socket.error, e:
+        raise socket.error("Connection error (%s:%s)" % (targetHost, 88), e)
+
     s.sendall(messageLen + data)
 
     recvDataLen = struct.unpack('!i', s.recv(4))[0]
@@ -343,8 +348,12 @@ def getKerberosTGS(serverName, domain, kdcHost, tgt, cipher, sessionKey):
     reqBody['till'] = KerberosTime.to_asn1(now)
     reqBody['nonce'] = random.getrandbits(31)
     seq_set_iter(reqBody, 'etype',
-                      (int(constants.EncryptionTypes.des3_cbc_sha1_kd.value),
-                       int(cipher.enctype)))
+                      (
+                          int(constants.EncryptionTypes.rc4_hmac.value),
+                          int(constants.EncryptionTypes.des3_cbc_sha1_kd.value),
+                          int(cipher.enctype)
+                       )
+                )
 
     message = encoder.encode(tgsReq)
 
@@ -363,7 +372,9 @@ def getKerberosTGS(serverName, domain, kdcHost, tgt, cipher, sessionKey):
 
     encTGSRepPart = decoder.decode(plainText, asn1Spec = EncTGSRepPart())[0]
 
-    newSessionKey = Key(cipher.enctype, str(encTGSRepPart['key']['keyvalue']))
+    newSessionKey = Key(encTGSRepPart['key']['keytype'], str(encTGSRepPart['key']['keyvalue']))
+    # Creating new cipher based on received keytype
+    cipher = _enctype_table[encTGSRepPart['key']['keytype']]
 
     # Check we've got what we asked for
     res = decoder.decode(r, asn1Spec = TGS_REP())[0]
@@ -440,6 +451,11 @@ def getKerberosType1(username, password, domain, lmhash, nthash, aesKey='', TGT 
                 # No cache present
                 pass
             else:
+                # retrieve user and domain information from CCache file if needed
+                if username == '' and len(ccache.principal.components) > 0:
+                    username = ccache.principal.components[0]['data']
+                if domain == '':
+                    domain = ccache.principal.realm['data']
                 LOG.debug("Using Kerberos Cache: %s" % os.getenv('KRB5CCNAME'))
                 principal = 'host/%s@%s' % (targetName.upper(), domain.upper())
                 creds = ccache.getCredential(principal)

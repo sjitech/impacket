@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -747,7 +747,7 @@ class ESENT_DB:
             done = False
             while done is False:
                 page = self.getPage(pageNum)
-                if page.record['FirstAvailablePageTag'] == 1:
+                if page.record['FirstAvailablePageTag'] <= 1:
                     # There are no records
                     done = True
                 for i in range(1, page.record['FirstAvailablePageTag']):

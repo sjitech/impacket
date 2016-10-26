@@ -1,4 +1,4 @@
-# Copyright (c) 2003-2015 CORE Security Technologies
+# Copyright (c) 2003-2016 CORE Security Technologies
 #
 # This software is provided under under a slightly modified version
 # of the Apache Software License. See the accompanying LICENSE file
@@ -113,6 +113,10 @@ class AddressType(Enum):
     AppleTalk_DDP   = 16
     NetBios         = 20
     IPv6            = 24
+
+# 3.1.5.9 Key Usage Numbers
+KERB_NON_KERB_SALT       = 16
+KERB_NON_KERB_CKSUM_SALT = 17
 
 # 7.5.4.  Authorization Data Types
 class AuthorizationDataType(Enum):
